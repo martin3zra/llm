@@ -41,8 +41,8 @@ func TestToAnthropicParams_NoToolChoiceByDefault(t *testing.T) {
 func verifyAgainst(t *testing.T, status int, body string) error {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			t.Errorf("path = %s, want /v1/models", r.URL.Path)
+		if r.URL.Path != "/v1/models/claude-haiku-4-5" {
+			t.Errorf("path = %s, want /v1/models/claude-haiku-4-5", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -50,11 +50,11 @@ func verifyAgainst(t *testing.T, status int, body string) error {
 	}))
 	defer srv.Close()
 	a := New("sk-ant-test", option.WithBaseURL(srv.URL), option.WithMaxRetries(0))
-	return a.Verify(context.Background())
+	return a.Verify(context.Background(), "claude-haiku-4-5")
 }
 
 func TestVerify_AcceptedKey(t *testing.T) {
-	if err := verifyAgainst(t, http.StatusOK, `{"data":[],"has_more":false,"first_id":null,"last_id":null}`); err != nil {
+	if err := verifyAgainst(t, http.StatusOK, `{"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5","created_at":"2025-10-01T00:00:00Z"}`); err != nil {
 		t.Fatalf("Verify = %v, want nil", err)
 	}
 }
@@ -68,3 +68,11 @@ func TestVerify_RejectedKeyIsKindAuth(t *testing.T) {
 }
 
 var _ llm.Verifier = (*Adapter)(nil)
+
+func TestVerify_UnknownModelIsKindInvalidReq(t *testing.T) {
+	err := verifyAgainst(t, http.StatusNotFound, `{"type":"error","error":{"type":"not_found_error","message":"model: claude-haiku-4-5"}}`)
+	var perr *llm.Error
+	if !errors.As(err, &perr) || perr.Kind != llm.KindInvalidReq {
+		t.Fatalf("Verify = %v, want an *llm.Error of KindInvalidReq", err)
+	}
+}

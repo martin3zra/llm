@@ -85,9 +85,10 @@ type Provider interface {
 	StreamChat(ctx context.Context, req ChatRequest) (<-chan Event, error)
 }
 
-// Verifier checks that the adapter's API key is accepted without spending
-// tokens, for validating a key when it's saved. A rejected key comes back as
-// an *Error of KindAuth.
+// Verifier checks, without spending tokens, that the adapter's API key is
+// accepted and can use model: for validating a key and model when they're
+// saved. A rejected key comes back as an *Error of KindAuth, an unknown model
+// as KindInvalidReq.
 type Verifier interface {
-	Verify(ctx context.Context) error
+	Verify(ctx context.Context, model string) error
 }

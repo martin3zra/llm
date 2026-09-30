@@ -11,7 +11,8 @@ that loop. Every adapter is built from one user's own key (`anthropic.New`,
 - `llm.Provider` streams one model turn: text deltas, tool calls, then done or
   an error.
 - `llm.ChatRequest.ToolChoice` forces a named tool, for structured extraction.
-- `llm.Verifier` checks a key without spending tokens, for when it's saved.
+- `llm.Verifier` checks a key and a model without spending tokens, for when
+  they're saved.
 - `llm.Error` sorts vendor failures into `KindAuth`, `KindRateLimit`,
   `KindInvalidReq`, `KindUnavailable` and `KindUnknown`. Show the `Kind` or
   `Message`, never the wrapped cause.

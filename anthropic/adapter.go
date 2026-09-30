@@ -98,10 +98,10 @@ func toAnthropicParams(req llm.ChatRequest) sdk.MessageNewParams {
 	return params
 }
 
-// Verify lists one model: free, no tokens, and it fails with 401/403 for a
-// bad or disabled key.
-func (a *Adapter) Verify(ctx context.Context) error {
-	_, err := a.client.Models.List(ctx, sdk.ModelListParams{Limit: sdk.Int(1)})
+// Verify looks up model: free, no tokens. It fails with 401/403 for a bad or
+// disabled key, and 404 for a model the key can't use.
+func (a *Adapter) Verify(ctx context.Context, model string) error {
+	_, err := a.client.Models.Get(ctx, model, sdk.ModelGetParams{})
 	if err != nil {
 		return normalizeError(err)
 	}

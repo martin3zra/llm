@@ -98,10 +98,10 @@ func toOpenAIParams(req llm.ChatRequest) sdk.ChatCompletionNewParams {
 	return params
 }
 
-// Verify lists the models the key can use: free, no tokens, and it fails
-// with 401 for a bad or revoked key.
-func (a *Adapter) Verify(ctx context.Context) error {
-	if _, err := a.client.Models.List(ctx); err != nil {
+// Verify looks up model: free, no tokens. It fails with 401 for a bad or
+// revoked key, and 404 for a model the key can't use.
+func (a *Adapter) Verify(ctx context.Context, model string) error {
+	if _, err := a.client.Models.Get(ctx, model); err != nil {
 		return normalizeError(err)
 	}
 	return nil

@@ -42,8 +42,8 @@ func TestToOpenAIParams_NoToolChoiceByDefault(t *testing.T) {
 func verifyAgainst(t *testing.T, status int, body string) error {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" {
-			t.Errorf("path = %s, want /models", r.URL.Path)
+		if r.URL.Path != "/models/gpt-5-mini" {
+			t.Errorf("path = %s, want /models/gpt-5-mini", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -51,11 +51,11 @@ func verifyAgainst(t *testing.T, status int, body string) error {
 	}))
 	defer srv.Close()
 	a := New("sk-test", option.WithBaseURL(srv.URL), option.WithMaxRetries(0))
-	return a.Verify(context.Background())
+	return a.Verify(context.Background(), "gpt-5-mini")
 }
 
 func TestVerify_AcceptedKey(t *testing.T) {
-	if err := verifyAgainst(t, http.StatusOK, `{"object":"list","data":[]}`); err != nil {
+	if err := verifyAgainst(t, http.StatusOK, `{"id":"gpt-5-mini","object":"model","created":1754000000,"owned_by":"openai"}`); err != nil {
 		t.Fatalf("Verify = %v, want nil", err)
 	}
 }
@@ -69,3 +69,11 @@ func TestVerify_RejectedKeyIsKindAuth(t *testing.T) {
 }
 
 var _ llm.Verifier = (*Adapter)(nil)
+
+func TestVerify_UnknownModelIsKindInvalidReq(t *testing.T) {
+	err := verifyAgainst(t, http.StatusNotFound, `{"error":{"message":"The model 'gpt-5-mini' does not exist","type":"invalid_request_error","code":"model_not_found"}}`)
+	var perr *llm.Error
+	if !errors.As(err, &perr) || perr.Kind != llm.KindInvalidReq {
+		t.Fatalf("Verify = %v, want an *llm.Error of KindInvalidReq", err)
+	}
+}
