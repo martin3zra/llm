@@ -1,0 +1,70 @@
+package anthropic
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go/option"
+
+	"github.com/martin3zra/llm"
+)
+
+func TestToAnthropicParams_ToolChoiceForcesNamedTool(t *testing.T) {
+	m := marshalOne(t, toAnthropicParams(llm.ChatRequest{
+		Model:      "claude-haiku-4-5",
+		Messages:   []llm.Message{{Role: llm.RoleUser, Text: "800 barbería"}},
+		Tools:      []llm.ToolSpec{{Name: "record_expense", InputSchema: []byte(`{"type":"object"}`)}},
+		ToolChoice: "record_expense",
+	}))
+	choice, ok := m["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice missing: %v", m)
+	}
+	if choice["type"] != "tool" || choice["name"] != "record_expense" {
+		t.Errorf("tool_choice = %v, want {type: tool, name: record_expense}", choice)
+	}
+}
+
+func TestToAnthropicParams_NoToolChoiceByDefault(t *testing.T) {
+	m := marshalOne(t, toAnthropicParams(llm.ChatRequest{
+		Model:    "claude-haiku-4-5",
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	}))
+	if _, ok := m["tool_choice"]; ok {
+		t.Errorf("tool_choice = %v, want it left out", m["tool_choice"])
+	}
+}
+
+func verifyAgainst(t *testing.T, status int, body string) error {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %s, want /v1/models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	a := New("sk-ant-test", option.WithBaseURL(srv.URL), option.WithMaxRetries(0))
+	return a.Verify(context.Background())
+}
+
+func TestVerify_AcceptedKey(t *testing.T) {
+	if err := verifyAgainst(t, http.StatusOK, `{"data":[],"has_more":false,"first_id":null,"last_id":null}`); err != nil {
+		t.Fatalf("Verify = %v, want nil", err)
+	}
+}
+
+func TestVerify_RejectedKeyIsKindAuth(t *testing.T) {
+	err := verifyAgainst(t, http.StatusUnauthorized, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+	var perr *llm.Error
+	if !errors.As(err, &perr) || perr.Kind != llm.KindAuth {
+		t.Fatalf("Verify = %v, want an *llm.Error of KindAuth", err)
+	}
+}
+
+var _ llm.Verifier = (*Adapter)(nil)
