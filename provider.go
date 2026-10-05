@@ -58,11 +58,27 @@ const (
 	EventError    EventKind = "error"
 )
 
+// Usage is the token count of one model turn, for metering. Input counts
+// uncached prompt tokens; prompt-cache writes and reads are reported apart
+// because providers price them differently.
+type Usage struct {
+	Input      int
+	Output     int
+	CacheWrite int
+	CacheRead  int
+}
+
+// Add sums u and v, for totalling several turns.
+func (u Usage) Add(v Usage) Usage {
+	return Usage{u.Input + v.Input, u.Output + v.Output, u.CacheWrite + v.CacheWrite, u.CacheRead + v.CacheRead}
+}
+
 // Event is one unit of streamed output from a provider.
 type Event struct {
 	Kind    EventKind
 	Text    string   // set on EventDelta: an incremental chunk of assistant text
 	ToolUse *ToolUse // set on EventToolCall
+	Usage   *Usage   // set on EventDone when the provider reported it
 	Err     error    // set on EventError; normalized, see errors.go
 }
 

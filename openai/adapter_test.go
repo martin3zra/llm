@@ -164,3 +164,10 @@ func TestNormalizeError_NonAPIErrorIsUnknown(t *testing.T) {
 type plainError struct{}
 
 func (plainError) Error() string { return "context deadline exceeded" }
+
+func TestToOpenAIParams_AsksForUsage(t *testing.T) {
+	params := toOpenAIParams(llm.ChatRequest{Model: "gpt-x"})
+	if !params.StreamOptions.IncludeUsage.Valid() || !params.StreamOptions.IncludeUsage.Value {
+		t.Fatal("stream_options.include_usage isn't set; streams would report no usage")
+	}
+}

@@ -50,9 +50,20 @@ func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan l
 		defer stream.Close()
 
 		acc := sdk.ChatCompletionAccumulator{}
+		var usage *llm.Usage
 		for stream.Next() {
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
+
+			// With include_usage, the last chunk carries the totals.
+			if chunk.Usage.TotalTokens > 0 {
+				cached := int(chunk.Usage.PromptTokensDetails.CachedTokens)
+				usage = &llm.Usage{
+					Input:     int(chunk.Usage.PromptTokens) - cached,
+					Output:    int(chunk.Usage.CompletionTokens),
+					CacheRead: cached,
+				}
+			}
 
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 				out <- llm.Event{Kind: llm.EventDelta, Text: chunk.Choices[0].Delta.Content}
@@ -77,7 +88,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan l
 			}
 		}
 
-		out <- llm.Event{Kind: llm.EventDone}
+		out <- llm.Event{Kind: llm.EventDone, Usage: usage}
 	}()
 
 	return out, nil
@@ -89,6 +100,8 @@ func toOpenAIParams(req llm.ChatRequest) sdk.ChatCompletionNewParams {
 		Model:    sdk.ChatModel(req.Model),
 		Messages: toOpenAIMessages(req.System, req.Messages),
 		Tools:    toOpenAITools(req.Tools),
+		// Without this the stream never reports token usage.
+		StreamOptions: sdk.ChatCompletionStreamOptionsParam{IncludeUsage: sdk.Bool(true)},
 	}
 	if req.ToolChoice != "" {
 		params.ToolChoice = sdk.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(

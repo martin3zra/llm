@@ -75,7 +75,12 @@ func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan l
 			}
 		}
 
-		out <- llm.Event{Kind: llm.EventDone}
+		out <- llm.Event{Kind: llm.EventDone, Usage: &llm.Usage{
+			Input:      int(acc.Usage.InputTokens),
+			Output:     int(acc.Usage.OutputTokens),
+			CacheWrite: int(acc.Usage.CacheCreationInputTokens),
+			CacheRead:  int(acc.Usage.CacheReadInputTokens),
+		}}
 	}()
 
 	return out, nil
