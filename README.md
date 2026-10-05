@@ -13,6 +13,13 @@ that loop. Every adapter is built from one user's own key (`anthropic.New`,
 - `llm.ChatRequest.ToolChoice` forces a named tool, for structured extraction.
 - `llm.Verifier` checks a key and a model without spending tokens, for when
   they're saved.
+- `EventDone` carries the turn's `llm.Usage` (input, output, cache write and
+  cache read tokens), for metering.
+- `agent.Run` (in `llm/agent`) runs one user turn of the tool-calling loop:
+  stream the answer, call the tools the model asks for, feed results back,
+  and repeat. The caller keeps the history: `Run` takes it and reports the
+  messages the turn added, plus summed usage, in its done event. A tool's
+  `Result.Payload` reaches the caller but never the model.
 - `llm.Error` sorts vendor failures into `KindAuth`, `KindRateLimit`,
   `KindInvalidReq`, `KindUnavailable` and `KindUnknown`. Show the `Kind` or
   `Message`, never the wrapped cause.
