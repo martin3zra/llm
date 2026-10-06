@@ -172,3 +172,26 @@ func TestRunStopsWhenCancelled(t *testing.T) {
 	}
 	// The channel closed without the caller draining every event: no leak.
 }
+
+type idTool struct{ seen *string }
+
+func (idTool) Spec() llm.ToolSpec {
+	return llm.ToolSpec{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (t idTool) Call(ctx context.Context, _ json.RawMessage) (Result, error) {
+	*t.seen = ToolUseID(ctx)
+	return Result{Content: "ok"}, nil
+}
+
+func TestToolSeesItsCallID(t *testing.T) {
+	var seen string
+	p := &scripted{turns: [][]llm.Event{{use("call_42"), done(1, 1)}, {done(1, 1)}}}
+	collect(Run(context.Background(), p, Request{History: []llm.Message{{Role: llm.RoleUser, Text: "x"}}, Tools: []Tool{idTool{&seen}}}))
+	if seen != "call_42" {
+		t.Fatalf("ToolUseID = %q", seen)
+	}
+	if ToolUseID(context.Background()) != "" {
+		t.Fatal("ToolUseID outside Run should be empty")
+	}
+}

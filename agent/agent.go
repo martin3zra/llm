@@ -168,10 +168,21 @@ func Run(ctx context.Context, p llm.Provider, req Request) <-chan Event {
 	return out
 }
 
+type toolUseKey struct{}
+
+// ToolUseID returns the id of the model's tool call a Tool.Call is serving,
+// so a tool can tie what it records (a run log, a stored result) to that
+// call in the conversation history. It's "" outside Run.
+func ToolUseID(ctx context.Context) string {
+	id, _ := ctx.Value(toolUseKey{}).(string)
+	return id
+}
+
 func callTool(ctx context.Context, t Tool, call *llm.ToolUse, timeout time.Duration) Result {
 	if t == nil {
 		return Result{Content: fmt.Sprintf("error: unknown tool %q", call.Name), IsError: true}
 	}
+	ctx = context.WithValue(ctx, toolUseKey{}, call.ID)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	res, err := t.Call(ctx, call.Input)
