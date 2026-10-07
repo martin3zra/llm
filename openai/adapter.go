@@ -1,8 +1,7 @@
-// Package openai adapts the Chat Completions API to the vendor-neutral
-// llm.Provider interface. Deliberately targets Chat Completions, not
-// the newer Responses API — Chat Completions' tool-calling shape and
-// streaming semantics map onto llm.Provider with less translation,
-// and it remains fully supported.
+// Package openai adapts the Responses API to the vendor-neutral
+// llm.Provider interface. It targets Responses rather than Chat Completions
+// because newer reasoning models (gpt-6-luna, for one) refuse function
+// tools on Chat Completions unless reasoning is switched off.
 package openai
 
 import (
@@ -13,7 +12,7 @@ import (
 
 	sdk "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/responses"
 
 	"github.com/martin3zra/llm"
 )
@@ -42,31 +41,42 @@ func New(apiKey string, opts ...option.RequestOption) *Adapter {
 func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan llm.Event, error) {
 	params := toOpenAIParams(req)
 
-	stream := a.client.Chat.Completions.NewStreaming(ctx, params)
+	stream := a.client.Responses.NewStreaming(ctx, params)
 
 	out := make(chan llm.Event)
 	go func() {
 		defer close(out)
 		defer stream.Close()
 
-		acc := sdk.ChatCompletionAccumulator{}
+		var calls []llm.ToolUse
 		var usage *llm.Usage
 		for stream.Next() {
-			chunk := stream.Current()
-			acc.AddChunk(chunk)
-
-			// With include_usage, the last chunk carries the totals.
-			if chunk.Usage.TotalTokens > 0 {
-				cached := int(chunk.Usage.PromptTokensDetails.CachedTokens)
-				usage = &llm.Usage{
-					Input:     int(chunk.Usage.PromptTokens) - cached,
-					Output:    int(chunk.Usage.CompletionTokens),
-					CacheRead: cached,
+			ev := stream.Current()
+			switch ev.Type {
+			case "response.output_text.delta":
+				if d := ev.AsResponseOutputTextDelta().Delta; d != "" {
+					out <- llm.Event{Kind: llm.EventDelta, Text: d}
 				}
-			}
-
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				out <- llm.Event{Kind: llm.EventDelta, Text: chunk.Choices[0].Delta.Content}
+			case "response.output_item.done":
+				if item := ev.AsResponseOutputItemDone().Item; item.Type == "function_call" {
+					calls = append(calls, llm.ToolUse{
+						ID:    item.CallID,
+						Name:  item.Name,
+						Input: json.RawMessage(item.Arguments),
+					})
+				}
+			case "response.completed", "response.incomplete":
+				// An incomplete response (output token cap, content filter)
+				// still ends the turn normally, as a truncated answer.
+				usage = toUsage(ev.Response.Usage)
+			case "response.failed":
+				e := ev.AsResponseFailed().Response.Error
+				out <- llm.Event{Kind: llm.EventError, Err: streamError(string(e.Code), e.Message)}
+				return
+			case "error":
+				e := ev.AsError()
+				out <- llm.Event{Kind: llm.EventError, Err: streamError(e.Code, e.Message)}
+				return
 			}
 		}
 
@@ -75,38 +85,45 @@ func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan l
 			return
 		}
 
-		if len(acc.Choices) > 0 {
-			for _, tc := range acc.Choices[0].Message.ToolCalls {
-				out <- llm.Event{
-					Kind: llm.EventToolCall,
-					ToolUse: &llm.ToolUse{
-						ID:    tc.ID,
-						Name:  tc.Function.Name,
-						Input: json.RawMessage(tc.Function.Arguments),
-					},
-				}
-			}
+		for i := range calls {
+			out <- llm.Event{Kind: llm.EventToolCall, ToolUse: &calls[i]}
 		}
-
 		out <- llm.Event{Kind: llm.EventDone, Usage: usage}
 	}()
 
 	return out, nil
 }
 
-// toOpenAIParams maps one ChatRequest onto the Chat Completions request.
-func toOpenAIParams(req llm.ChatRequest) sdk.ChatCompletionNewParams {
-	params := sdk.ChatCompletionNewParams{
-		Model:    sdk.ChatModel(req.Model),
-		Messages: toOpenAIMessages(req.System, req.Messages),
-		Tools:    toOpenAITools(req.Tools),
-		// Without this the stream never reports token usage.
-		StreamOptions: sdk.ChatCompletionStreamOptionsParam{IncludeUsage: sdk.Bool(true)},
+func toUsage(u responses.ResponseUsage) *llm.Usage {
+	if u.TotalTokens == 0 {
+		return nil
+	}
+	cached := int(u.InputTokensDetails.CachedTokens)
+	return &llm.Usage{
+		Input:     int(u.InputTokens) - cached,
+		Output:    int(u.OutputTokens),
+		CacheRead: cached,
+	}
+}
+
+// toOpenAIParams maps one ChatRequest onto the Responses request.
+func toOpenAIParams(req llm.ChatRequest) responses.ResponseNewParams {
+	params := responses.ResponseNewParams{
+		Model: req.Model,
+		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: toOpenAIInput(req.Messages)},
+		Tools: toOpenAITools(req.Tools),
+		// Chat Completions kept nothing by default; Responses stores every
+		// response on OpenAI's side unless told not to. The caller keeps
+		// the history, so there's nothing to gain from storing it.
+		Store: sdk.Bool(false),
+	}
+	if req.System != "" {
+		params.Instructions = sdk.String(req.System)
 	}
 	if req.ToolChoice != "" {
-		params.ToolChoice = sdk.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
-			sdk.ChatCompletionNamedToolChoiceFunctionParam{Name: req.ToolChoice},
-		)
+		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{
+			OfFunctionTool: &responses.ToolChoiceFunctionParam{Name: req.ToolChoice},
+		}
 	}
 	return params
 }
@@ -120,64 +137,57 @@ func (a *Adapter) Verify(ctx context.Context, model string) error {
 	return nil
 }
 
-// toOpenAIMessages injects the system prompt as the first message — Chat
-// Completions has a dedicated system role, unlike Anthropic's separate
-// top-level System param.
-func toOpenAIMessages(system string, msgs []llm.Message) []sdk.ChatCompletionMessageParamUnion {
-	out := make([]sdk.ChatCompletionMessageParamUnion, 0, len(msgs)+1)
-	if system != "" {
-		out = append(out, sdk.SystemMessage(system))
-	}
-
+// toOpenAIInput maps history onto Responses input items. The system prompt
+// isn't one of them: Responses takes it as top-level instructions.
+func toOpenAIInput(msgs []llm.Message) responses.ResponseInputParam {
+	out := make(responses.ResponseInputParam, 0, len(msgs))
 	for _, m := range msgs {
 		switch {
 		case m.ToolResult != nil:
-			// OpenAI has a distinct "tool" role, unlike Anthropic which
-			// feeds tool results back as a user turn.
-			out = append(out, sdk.ToolMessage(m.ToolResult.Content, m.ToolResult.ToolUseID))
+			// Results are their own item type, matched to the call by
+			// call_id, unlike Anthropic which feeds them back as a user turn.
+			out = append(out, responses.ResponseInputItemParamOfFunctionCallOutput(m.ToolResult.ToolUseID, m.ToolResult.Content))
 		case m.ToolUse != nil:
-			out = append(out, sdk.ChatCompletionMessageParamUnion{
-				OfAssistant: &sdk.ChatCompletionAssistantMessageParam{
-					ToolCalls: []sdk.ChatCompletionMessageToolCallParam{
-						{
-							ID: m.ToolUse.ID,
-							Function: sdk.ChatCompletionMessageToolCallFunctionParam{
-								Name:      m.ToolUse.Name,
-								Arguments: string(m.ToolUse.Input),
-							},
-						},
-					},
-				},
-			})
+			out = append(out, responses.ResponseInputItemParamOfFunctionCall(string(m.ToolUse.Input), m.ToolUse.ID, m.ToolUse.Name))
 		case m.Role == llm.RoleAssistant:
-			out = append(out, sdk.AssistantMessage(m.Text))
+			out = append(out, responses.ResponseInputItemParamOfMessage(m.Text, responses.EasyInputMessageRoleAssistant))
 		default:
-			out = append(out, sdk.UserMessage(m.Text))
+			out = append(out, responses.ResponseInputItemParamOfMessage(m.Text, responses.EasyInputMessageRoleUser))
 		}
 	}
 	return out
 }
 
-func toOpenAITools(specs []llm.ToolSpec) []sdk.ChatCompletionToolParam {
-	out := make([]sdk.ChatCompletionToolParam, 0, len(specs))
+func toOpenAITools(specs []llm.ToolSpec) []responses.ToolUnionParam {
+	out := make([]responses.ToolUnionParam, 0, len(specs))
 	for _, spec := range specs {
-		var schema shared.FunctionParameters
+		var schema map[string]any
 		// Malformed schemas are a programmer error in the caller's tool list, not a
 		// runtime condition to recover from — an empty parameter list is
 		// an acceptable degraded fallback rather than crashing the request.
-		_ = json.Unmarshal(spec.InputSchema, &schema)
+		if json.Unmarshal(spec.InputSchema, &schema) != nil || schema == nil {
+			schema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
 
-		out = append(out, sdk.ChatCompletionToolParam{
-			Function: shared.FunctionDefinitionParam{
-				Name:        spec.Name,
-				Description: sdk.String(spec.Description),
-				Parameters:  schema,
-			},
-		})
+		fn := &responses.FunctionToolParam{
+			Name:       spec.Name,
+			Parameters: schema,
+			// Strict mode wants every property required and
+			// additionalProperties false; callers' schemas aren't written
+			// that way.
+			Strict: sdk.Bool(false),
+		}
+		if spec.Description != "" {
+			fn.Description = sdk.String(spec.Description)
+		}
+		out = append(out, responses.ToolUnionParam{OfFunction: fn})
 	}
 	return out
 }
 
+// normalizeError sorts an HTTP failure by status. For a rejected request it
+// keeps OpenAI's own reason: it names the parameter at fault and never
+// contains the key.
 func normalizeError(err error) *llm.Error {
 	var apiErr *sdk.Error
 	if errors.As(err, &apiErr) {
@@ -187,9 +197,26 @@ func normalizeError(err error) *llm.Error {
 		case http.StatusTooManyRequests:
 			return llm.NewError(llm.KindRateLimit, "OpenAI is rate-limiting this request", err)
 		case http.StatusBadRequest, http.StatusNotFound:
-			return llm.NewError(llm.KindInvalidReq, "OpenAI rejected the request (check model name)", err)
+			msg := "OpenAI rejected the request"
+			if apiErr.Message != "" {
+				msg += ": " + apiErr.Message
+			}
+			return llm.NewError(llm.KindInvalidReq, msg, err)
 		}
 		return llm.NewError(llm.KindUnavailable, "OpenAI API error", err)
 	}
 	return llm.NewError(llm.KindUnknown, err.Error(), err)
+}
+
+// streamError sorts a failure reported inside the stream, after the HTTP
+// request itself succeeded.
+func streamError(code, message string) *llm.Error {
+	if message == "" {
+		message = "OpenAI failed to finish the response"
+	}
+	cause := errors.New(code + ": " + message)
+	if code == "rate_limit_exceeded" {
+		return llm.NewError(llm.KindRateLimit, "OpenAI is rate-limiting this request", cause)
+	}
+	return llm.NewError(llm.KindUnavailable, message, cause)
 }

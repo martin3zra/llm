@@ -1,7 +1,7 @@
 # llm
 
 A small, vendor-neutral interface for talking to an LLM with tool calling, plus
-adapters for Anthropic (Messages API) and OpenAI (Chat Completions API).
+adapters for Anthropic (Messages API) and OpenAI (Responses API).
 
 The caller runs its own tool-calling loop against `llm.Provider` and never
 touches a vendor SDK type, so switching or adding a provider doesn't change

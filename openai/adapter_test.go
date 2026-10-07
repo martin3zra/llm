@@ -25,80 +25,83 @@ func marshalOne(t *testing.T, v any) map[string]any {
 	return m
 }
 
-func TestToOpenAIMessages_InjectsSystemPromptFirst(t *testing.T) {
-	out := toOpenAIMessages("be helpful", []llm.Message{
-		{Role: llm.RoleUser, Text: "hi"},
-	})
-	if len(out) != 2 {
-		t.Fatalf("got %d messages, want 2 (system + user)", len(out))
+func TestToOpenAIParams_SystemPromptBecomesInstructions(t *testing.T) {
+	m := marshalOne(t, toOpenAIParams(llm.ChatRequest{
+		Model:    "gpt-x",
+		System:   "be helpful",
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+	}))
+	if m["instructions"] != "be helpful" {
+		t.Errorf("instructions = %v, want the system prompt", m["instructions"])
 	}
-	m := marshalOne(t, out[0])
-	if m["role"] != "system" || m["content"] != "be helpful" {
-		t.Errorf("first message = %+v, want the system prompt", m)
-	}
-}
-
-func TestToOpenAIMessages_OmitsSystemMessageWhenEmpty(t *testing.T) {
-	out := toOpenAIMessages("", []llm.Message{{Role: llm.RoleUser, Text: "hi"}})
-	if len(out) != 1 {
-		t.Fatalf("got %d messages, want 1 (no system message)", len(out))
+	if input := m["input"].([]any); len(input) != 1 {
+		t.Errorf("got %d input items, want 1 (the system prompt isn't one)", len(input))
 	}
 }
 
-func TestToOpenAIMessages_PlainUserAndAssistantText(t *testing.T) {
-	out := toOpenAIMessages("", []llm.Message{
+func TestToOpenAIParams_OmitsInstructionsWhenEmpty(t *testing.T) {
+	m := marshalOne(t, toOpenAIParams(llm.ChatRequest{Model: "gpt-x", Messages: []llm.Message{{Role: llm.RoleUser, Text: "hi"}}}))
+	if _, ok := m["instructions"]; ok {
+		t.Errorf("instructions = %v, want it left out", m["instructions"])
+	}
+}
+
+func TestToOpenAIParams_DoesNotStoreResponses(t *testing.T) {
+	m := marshalOne(t, toOpenAIParams(llm.ChatRequest{Model: "gpt-x"}))
+	if m["store"] != false {
+		t.Errorf("store = %v, want false", m["store"])
+	}
+}
+
+func TestToOpenAIInput_PlainUserAndAssistantText(t *testing.T) {
+	out := toOpenAIInput([]llm.Message{
 		{Role: llm.RoleUser, Text: "what's the status?"},
 		{Role: llm.RoleAssistant, Text: "let me check"},
 	})
-	if m := marshalOne(t, out[0]); m["role"] != "user" {
-		t.Errorf("role = %v, want user", m["role"])
+	if m := marshalOne(t, out[0]); m["role"] != "user" || m["content"] != "what's the status?" {
+		t.Errorf("first item = %+v, want the user's text", m)
 	}
-	if m := marshalOne(t, out[1]); m["role"] != "assistant" {
-		t.Errorf("role = %v, want assistant", m["role"])
+	if m := marshalOne(t, out[1]); m["role"] != "assistant" || m["content"] != "let me check" {
+		t.Errorf("second item = %+v, want the assistant's text", m)
 	}
 }
 
-func TestToOpenAIMessages_ToolUseBecomesAssistantToolCall(t *testing.T) {
-	out := toOpenAIMessages("", []llm.Message{
+func TestToOpenAIInput_ToolUseBecomesFunctionCall(t *testing.T) {
+	out := toOpenAIInput([]llm.Message{
 		{ToolUse: &llm.ToolUse{ID: "call_1", Name: "get_payroll_period_status", Input: json.RawMessage(`{"period_uuid":"abc"}`)}},
 	})
 	m := marshalOne(t, out[0])
-	if m["role"] != "assistant" {
-		t.Errorf("role = %v, want assistant", m["role"])
+	if m["type"] != "function_call" {
+		t.Errorf("type = %v, want function_call", m["type"])
 	}
-	toolCalls, ok := m["tool_calls"].([]any)
-	if !ok || len(toolCalls) != 1 {
-		t.Fatalf("tool_calls = %v, want a single entry", m["tool_calls"])
+	if m["call_id"] != "call_1" || m["name"] != "get_payroll_period_status" {
+		t.Errorf("call_id, name = %v, %v", m["call_id"], m["name"])
 	}
-	call := toolCalls[0].(map[string]any)
-	if call["id"] != "call_1" {
-		t.Errorf("id = %v, want call_1", call["id"])
+	if m["arguments"] != `{"period_uuid":"abc"}` {
+		t.Errorf("arguments = %v", m["arguments"])
 	}
-	fn := call["function"].(map[string]any)
-	if fn["name"] != "get_payroll_period_status" {
-		t.Errorf("function.name = %v", fn["name"])
-	}
-	if fn["arguments"] != `{"period_uuid":"abc"}` {
-		t.Errorf("function.arguments = %v", fn["arguments"])
+	// No item id: with store off there's no stored item for one to name.
+	if _, ok := m["id"]; ok {
+		t.Errorf("id = %v, want it left out", m["id"])
 	}
 }
 
-// TestToOpenAIMessages_ToolResultUsesToolRole documents a real API
-// difference from Anthropic: OpenAI has a distinct "tool" role, so unlike
-// the Anthropic adapter this does NOT get folded into a user turn.
-func TestToOpenAIMessages_ToolResultUsesToolRole(t *testing.T) {
-	out := toOpenAIMessages("", []llm.Message{
+// TestToOpenAIInput_ToolResultIsFunctionCallOutput documents a real API
+// difference from Anthropic: the result is its own item type, so unlike the
+// Anthropic adapter it does NOT get folded into a user turn.
+func TestToOpenAIInput_ToolResultIsFunctionCallOutput(t *testing.T) {
+	out := toOpenAIInput([]llm.Message{
 		{ToolResult: &llm.ToolResult{ToolUseID: "call_1", Content: `{"status":"draft"}`}},
 	})
 	m := marshalOne(t, out[0])
-	if m["role"] != "tool" {
-		t.Errorf("role = %v, want tool (OpenAI has a distinct tool role)", m["role"])
+	if m["type"] != "function_call_output" {
+		t.Errorf("type = %v, want function_call_output", m["type"])
 	}
-	if m["tool_call_id"] != "call_1" {
-		t.Errorf("tool_call_id = %v, want call_1", m["tool_call_id"])
+	if m["call_id"] != "call_1" {
+		t.Errorf("call_id = %v, want call_1", m["call_id"])
 	}
-	if m["content"] != `{"status":"draft"}` {
-		t.Errorf("content = %v", m["content"])
+	if m["output"] != `{"status":"draft"}` {
+		t.Errorf("output = %v", m["output"])
 	}
 }
 
@@ -118,17 +121,27 @@ func TestToOpenAITools_MapsNameDescriptionAndSchema(t *testing.T) {
 	if m["type"] != "function" {
 		t.Errorf("type = %v, want function", m["type"])
 	}
-	fn := m["function"].(map[string]any)
-	if fn["name"] != "get_payroll_period_status" {
-		t.Errorf("name = %v", fn["name"])
+	if m["name"] != "get_payroll_period_status" {
+		t.Errorf("name = %v", m["name"])
 	}
-	if fn["description"] != "look up a period" {
-		t.Errorf("description = %v", fn["description"])
+	if m["description"] != "look up a period" {
+		t.Errorf("description = %v", m["description"])
 	}
-	params := fn["parameters"].(map[string]any)
+	if m["strict"] != false {
+		t.Errorf("strict = %v, want false", m["strict"])
+	}
+	params := m["parameters"].(map[string]any)
 	required, _ := params["required"].([]any)
 	if len(required) != 1 || required[0] != "period_uuid" {
 		t.Errorf("parameters.required = %v, want [period_uuid]", params["required"])
+	}
+}
+
+func TestToOpenAITools_MalformedSchemaFallsBackToNoParameters(t *testing.T) {
+	m := marshalOne(t, toOpenAITools([]llm.ToolSpec{{Name: "ping", InputSchema: json.RawMessage(`not json`)}})[0])
+	params, ok := m["parameters"].(map[string]any)
+	if !ok || params["type"] != "object" {
+		t.Errorf("parameters = %v, want an empty object schema", m["parameters"])
 	}
 }
 
@@ -154,6 +167,13 @@ func TestNormalizeError_MapsStatusCodesToKind(t *testing.T) {
 	}
 }
 
+func TestNormalizeError_RejectedRequestKeepsOpenAIsReason(t *testing.T) {
+	got := normalizeError(&sdk.Error{StatusCode: http.StatusBadRequest, Message: "Unsupported parameter: 'temperature'."})
+	if want := "OpenAI rejected the request: Unsupported parameter: 'temperature'."; got.Message != want {
+		t.Errorf("message = %q, want %q", got.Message, want)
+	}
+}
+
 func TestNormalizeError_NonAPIErrorIsUnknown(t *testing.T) {
 	got := normalizeError(plainError{})
 	if got.Kind != llm.KindUnknown {
@@ -164,10 +184,3 @@ func TestNormalizeError_NonAPIErrorIsUnknown(t *testing.T) {
 type plainError struct{}
 
 func (plainError) Error() string { return "context deadline exceeded" }
-
-func TestToOpenAIParams_AsksForUsage(t *testing.T) {
-	params := toOpenAIParams(llm.ChatRequest{Model: "gpt-x"})
-	if !params.StreamOptions.IncludeUsage.Valid() || !params.StreamOptions.IncludeUsage.Value {
-		t.Fatal("stream_options.include_usage isn't set; streams would report no usage")
-	}
-}

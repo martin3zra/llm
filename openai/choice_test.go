@@ -23,9 +23,8 @@ func TestToOpenAIParams_ToolChoiceForcesNamedFunction(t *testing.T) {
 	if !ok {
 		t.Fatalf("tool_choice missing: %v", m)
 	}
-	fn, _ := choice["function"].(map[string]any)
-	if choice["type"] != "function" || fn["name"] != "record_expense" {
-		t.Errorf("tool_choice = %v, want {type: function, function: {name: record_expense}}", choice)
+	if choice["type"] != "function" || choice["name"] != "record_expense" {
+		t.Errorf("tool_choice = %v, want {type: function, name: record_expense}", choice)
 	}
 }
 
