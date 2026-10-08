@@ -93,6 +93,12 @@ type ChatRequest struct {
 	// the tool's input is the result. Empty leaves the choice to the model.
 	// It must name one of Tools.
 	ToolChoice string
+	// CacheSystem asks the provider to cache the prompt through System
+	// (tools and system prompt), for callers that resend a large, unchanged
+	// System across several requests. Providers that cache prefixes on their
+	// own (OpenAI) ignore it; prompts below the provider's minimum aren't
+	// cached either way.
+	CacheSystem bool
 }
 
 // Provider streams a single model turn. Implementations must close the

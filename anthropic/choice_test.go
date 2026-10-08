@@ -76,3 +76,19 @@ func TestVerify_UnknownModelIsKindInvalidReq(t *testing.T) {
 		t.Fatalf("Verify = %v, want an *llm.Error of KindInvalidReq", err)
 	}
 }
+
+func TestToAnthropicParams_CacheSystemMarksTheSystemBlock(t *testing.T) {
+	for _, cache := range []bool{false, true} {
+		m := marshalOne(t, toAnthropicParams(llm.ChatRequest{
+			Model:       "claude-haiku-4-5",
+			System:      "a long, stable prompt",
+			Messages:    []llm.Message{{Role: llm.RoleUser, Text: "hi"}},
+			CacheSystem: cache,
+		}))
+		system := m["system"].([]any)[0].(map[string]any)
+		cc, ok := system["cache_control"].(map[string]any)
+		if ok != cache || cache && cc["type"] != "ephemeral" {
+			t.Errorf("CacheSystem %v: system block = %v", cache, system)
+		}
+	}
+}

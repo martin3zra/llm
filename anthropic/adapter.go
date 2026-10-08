@@ -100,6 +100,11 @@ func toAnthropicParams(req llm.ChatRequest) sdk.MessageNewParams {
 	if req.ToolChoice != "" {
 		params.ToolChoice = sdk.ToolChoiceParamOfTool(req.ToolChoice)
 	}
+	if req.CacheSystem {
+		// A breakpoint on the system block caches tools and system together:
+		// the API renders tools first.
+		params.System[0].CacheControl = sdk.NewCacheControlEphemeralParam()
+	}
 	return params
 }
 
