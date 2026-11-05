@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
+	"sync"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -35,55 +37,96 @@ func New(apiKey string, opts ...option.RequestOption) *Adapter {
 
 func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan llm.Event, error) {
 	params := toAnthropicParams(req)
-
-	stream := a.client.Messages.NewStreaming(ctx, params)
+	if req.ToolChoice != "" && forcedChoiceUnsupported(req.Model) {
+		params = withAutoToolChoice(params, req.ToolChoice)
+	}
 
 	out := make(chan llm.Event)
 	go func() {
 		defer close(out)
-		defer stream.Close()
-
-		acc := sdk.Message{}
-		for stream.Next() {
-			event := stream.Current()
-			if err := acc.Accumulate(event); err != nil {
-				out <- llm.Event{Kind: llm.EventError, Err: normalizeError(err)}
-				return
-			}
-
-			if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
-				out <- llm.Event{Kind: llm.EventDelta, Text: event.Delta.Text}
-			}
+		emitted, err := a.stream(ctx, params, out)
+		// Some models (Claude Sonnet/Opus 5.5) reject a forced tool_choice.
+		// The rejection comes before any output, so retry once letting the
+		// model choose, told to call the named tool, and remember the model.
+		if err != nil && !emitted && req.ToolChoice != "" && rejectsForcedChoice(err) {
+			noForcedChoice.Store(req.Model, true)
+			emitted, err = a.stream(ctx, withAutoToolChoice(params, req.ToolChoice), out)
 		}
-
-		if err := stream.Err(); err != nil {
+		if err != nil {
 			out <- llm.Event{Kind: llm.EventError, Err: normalizeError(err)}
-			return
 		}
-
-		for _, block := range acc.Content {
-			if block.Type != "tool_use" {
-				continue
-			}
-			out <- llm.Event{
-				Kind: llm.EventToolCall,
-				ToolUse: &llm.ToolUse{
-					ID:    block.ID,
-					Name:  block.Name,
-					Input: json.RawMessage(block.Input),
-				},
-			}
-		}
-
-		out <- llm.Event{Kind: llm.EventDone, Usage: &llm.Usage{
-			Input:      int(acc.Usage.InputTokens),
-			Output:     int(acc.Usage.OutputTokens),
-			CacheWrite: int(acc.Usage.CacheCreationInputTokens),
-			CacheRead:  int(acc.Usage.CacheReadInputTokens),
-		}}
 	}()
 
 	return out, nil
+}
+
+// stream runs one Messages request and sends its events, except errors,
+// which it returns. emitted reports whether any event was sent.
+func (a *Adapter) stream(ctx context.Context, params sdk.MessageNewParams, out chan<- llm.Event) (emitted bool, err error) {
+	stream := a.client.Messages.NewStreaming(ctx, params)
+	defer stream.Close()
+
+	acc := sdk.Message{}
+	for stream.Next() {
+		event := stream.Current()
+		if err := acc.Accumulate(event); err != nil {
+			return emitted, err
+		}
+		if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
+			out <- llm.Event{Kind: llm.EventDelta, Text: event.Delta.Text}
+			emitted = true
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return emitted, err
+	}
+
+	for _, block := range acc.Content {
+		if block.Type != "tool_use" {
+			continue
+		}
+		out <- llm.Event{
+			Kind: llm.EventToolCall,
+			ToolUse: &llm.ToolUse{
+				ID:    block.ID,
+				Name:  block.Name,
+				Input: json.RawMessage(block.Input),
+			},
+		}
+	}
+	out <- llm.Event{Kind: llm.EventDone, Usage: &llm.Usage{
+		Input:      int(acc.Usage.InputTokens),
+		Output:     int(acc.Usage.OutputTokens),
+		CacheWrite: int(acc.Usage.CacheCreationInputTokens),
+		CacheRead:  int(acc.Usage.CacheReadInputTokens),
+	}}
+	return true, nil
+}
+
+// noForcedChoice holds the models that rejected a forced tool_choice.
+var noForcedChoice sync.Map
+
+func forcedChoiceUnsupported(model string) bool {
+	_, ok := noForcedChoice.Load(model)
+	return ok
+}
+
+func rejectsForcedChoice(err error) bool {
+	var apiErr *sdk.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(apiErr.Error(), "tool_choice")
+}
+
+// withAutoToolChoice lets the model choose and tells it, in the system
+// prompt, to answer by calling tool. It doesn't change params.
+func withAutoToolChoice(params sdk.MessageNewParams, tool string) sdk.MessageNewParams {
+	params.ToolChoice = sdk.ToolChoiceUnionParam{OfAuto: &sdk.ToolChoiceAutoParam{}}
+	system := append([]sdk.TextBlockParam(nil), params.System...)
+	system = append(system, sdk.TextBlockParam{
+		Text: "Answer only by calling the `" + tool + "` tool, exactly once. Don't reply in text.",
+	})
+	params.System = system
+	return params
 }
 
 // toAnthropicParams maps one ChatRequest onto the Messages API request.
@@ -179,8 +222,17 @@ func normalizeError(err error) *llm.Error {
 			return llm.NewError(llm.KindAuth, "Anthropic rejected the configured API key", err)
 		case http.StatusTooManyRequests:
 			return llm.NewError(llm.KindRateLimit, "Anthropic is rate-limiting this request", err)
-		case http.StatusBadRequest, http.StatusNotFound:
+		case http.StatusNotFound:
 			return llm.NewError(llm.KindInvalidReq, "Anthropic rejected the request (check model name)", err)
+		case http.StatusBadRequest:
+			msg := "Anthropic rejected the request"
+			var body struct {
+				Error struct{ Message string } `json:"error"`
+			}
+			if json.Unmarshal([]byte(apiErr.RawJSON()), &body) == nil && body.Error.Message != "" {
+				msg += ": " + body.Error.Message
+			}
+			return llm.NewError(llm.KindInvalidReq, msg, err)
 		}
 		return llm.NewError(llm.KindUnavailable, "Anthropic API error", err)
 	}
