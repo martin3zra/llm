@@ -99,6 +99,9 @@ type ChatRequest struct {
 	// own (OpenAI) ignore it; prompts below the provider's minimum aren't
 	// cached either way.
 	CacheSystem bool
+	// MaxTokens caps the reply's length. Zero keeps the adapter's default.
+	// Providers with a higher minimum (OpenAI's is 16) raise it to theirs.
+	MaxTokens int
 }
 
 // Provider streams a single model turn. Implementations must close the

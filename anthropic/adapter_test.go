@@ -157,3 +157,46 @@ func TestNormalizeError_NonAPIErrorIsUnknown(t *testing.T) {
 type plainError struct{}
 
 func (plainError) Error() string { return "context deadline exceeded" }
+
+// apiErrorWithBody is an *sdk.Error as the SDK builds it from a response.
+func apiErrorWithBody(t *testing.T, status int, body string) *sdk.Error {
+	t.Helper()
+	e := &sdk.Error{}
+	if err := json.Unmarshal([]byte(body), e); err != nil {
+		t.Fatalf("unmarshal error body: %v", err)
+	}
+	e.StatusCode = status
+	return e
+}
+
+func TestNormalizeError_OutOfCreditIsNoCredit(t *testing.T) {
+	cases := map[string]*sdk.Error{
+		"400 credit balance": apiErrorWithBody(t, http.StatusBadRequest,
+			`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`),
+		"402 billing_error": apiErrorWithBody(t, http.StatusPaymentRequired,
+			`{"type":"error","error":{"type":"billing_error","message":"Billing issue."}}`),
+		"402 without a body": {StatusCode: http.StatusPaymentRequired},
+	}
+	for name, apiErr := range cases {
+		if got := normalizeError(apiErr); got.Kind != llm.KindNoCredit {
+			t.Errorf("%s: kind = %q, want no_credit", name, got.Kind)
+		}
+	}
+}
+
+func TestNormalizeError_OtherBadRequestKeepsReason(t *testing.T) {
+	got := normalizeError(apiErrorWithBody(t, http.StatusBadRequest,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: too large"}}`))
+	if got.Kind != llm.KindInvalidReq || got.Message != "Anthropic rejected the request: max_tokens: too large" {
+		t.Errorf("got %q %q, want invalid_req with the reason", got.Kind, got.Message)
+	}
+}
+
+func TestToAnthropicParams_MaxTokens(t *testing.T) {
+	if got := toAnthropicParams(llm.ChatRequest{Model: "m"}).MaxTokens; got != defaultMaxTokens {
+		t.Errorf("default max_tokens = %d, want %d", got, defaultMaxTokens)
+	}
+	if got := toAnthropicParams(llm.ChatRequest{Model: "m", MaxTokens: 1}).MaxTokens; got != 1 {
+		t.Errorf("max_tokens = %d, want 1", got)
+	}
+}

@@ -13,6 +13,8 @@ that loop. Every adapter is built from one user's own key (`anthropic.New`,
 - `llm.ChatRequest.ToolChoice` forces a named tool, for structured extraction.
 - `llm.ChatRequest.CacheSystem` caches the tools and system prompt on
   Anthropic; OpenAI caches stable prefixes on its own.
+- `llm.ChatRequest.MaxTokens` caps the reply, for example 1 token to check
+  that an account still has credit. OpenAI raises anything under 16 to 16.
 - `llm.Verifier` checks a key and a model without spending tokens, for when
   they're saved.
 - `EventDone` carries the turn's `llm.Usage` (input, output, cache write and
@@ -23,8 +25,11 @@ that loop. Every adapter is built from one user's own key (`anthropic.New`,
   messages the turn added, plus summed usage, in its done event. A tool's
   `Result.Payload` reaches the caller but never the model.
 - `llm.Error` sorts vendor failures into `KindAuth`, `KindRateLimit`,
-  `KindInvalidReq`, `KindUnavailable` and `KindUnknown`. Show the `Kind` or
-  `Message`, never the wrapped cause.
+  `KindNoCredit`, `KindInvalidReq`, `KindUnavailable` and `KindUnknown`.
+  `KindNoCredit` means the account is out of credit or quota (Anthropic's 402
+  `billing_error` or "credit balance is too low", OpenAI's
+  `insufficient_quota`), so retrying won't help until credit is added. Show
+  the `Kind` or `Message`, never the wrapped cause.
 
 Used by `cactus-agent` and `tallyo` as a sibling checkout, through a `replace`
 directive in each one's `go.mod`:

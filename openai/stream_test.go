@@ -106,3 +106,14 @@ func TestStreamChat_ErrorEventIsAnError(t *testing.T) {
 		t.Fatalf("last event = %+v, want an error saying boom", last)
 	}
 }
+
+func TestStreamChat_InsufficientQuotaIsNoCredit(t *testing.T) {
+	got := streamFrom(t,
+		`{"type":"response.failed","sequence_number":1,"response":{"id":"resp_1","status":"failed","error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}}`,
+	)
+	last := got[len(got)-1]
+	var perr *llm.Error
+	if last.Kind != llm.EventError || !errors.As(last.Err, &perr) || perr.Kind != llm.KindNoCredit {
+		t.Fatalf("last event = %+v, want an error of KindNoCredit", last)
+	}
+}

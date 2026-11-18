@@ -184,3 +184,23 @@ func TestNormalizeError_NonAPIErrorIsUnknown(t *testing.T) {
 type plainError struct{}
 
 func (plainError) Error() string { return "context deadline exceeded" }
+
+func TestNormalizeError_InsufficientQuotaIsNoCredit(t *testing.T) {
+	got := normalizeError(&sdk.Error{StatusCode: http.StatusTooManyRequests, Code: "insufficient_quota",
+		Message: "You exceeded your current quota, please check your plan and billing details."})
+	if got.Kind != llm.KindNoCredit {
+		t.Errorf("kind = %q, want no_credit", got.Kind)
+	}
+}
+
+func TestToOpenAIParams_MaxTokens(t *testing.T) {
+	if p := toOpenAIParams(llm.ChatRequest{Model: "m"}); p.MaxOutputTokens.Valid() {
+		t.Errorf("max_output_tokens set without MaxTokens")
+	}
+	if got := toOpenAIParams(llm.ChatRequest{Model: "m", MaxTokens: 1}).MaxOutputTokens.Value; got != minMaxTokens {
+		t.Errorf("max_output_tokens = %d, want the minimum %d", got, minMaxTokens)
+	}
+	if got := toOpenAIParams(llm.ChatRequest{Model: "m", MaxTokens: 500}).MaxOutputTokens.Value; got != 500 {
+		t.Errorf("max_output_tokens = %d, want 500", got)
+	}
+}

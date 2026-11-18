@@ -13,7 +13,10 @@ const (
 	KindRateLimit   Kind = "rate_limit"  // provider is throttling
 	KindInvalidReq  Kind = "invalid_req" // bad model name, malformed request, etc.
 	KindUnavailable Kind = "unavailable" // provider outage / timeout
-	KindUnknown     Kind = "unknown"
+	// KindNoCredit means the account behind the key is out of credit or
+	// quota. Waiting won't fix it; adding credit with the provider will.
+	KindNoCredit Kind = "no_credit"
+	KindUnknown  Kind = "unknown"
 )
 
 // Error wraps a provider-specific failure with a normalized Kind. Message is

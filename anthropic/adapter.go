@@ -140,6 +140,9 @@ func toAnthropicParams(req llm.ChatRequest) sdk.MessageNewParams {
 		Messages: toAnthropicMessages(req.Messages),
 		Tools:    toAnthropicTools(req.Tools),
 	}
+	if req.MaxTokens > 0 {
+		params.MaxTokens = int64(req.MaxTokens)
+	}
 	if req.ToolChoice != "" {
 		params.ToolChoice = sdk.ToolChoiceParamOfTool(req.ToolChoice)
 	}
@@ -217,6 +220,17 @@ func toAnthropicTools(specs []llm.ToolSpec) []sdk.ToolUnionParam {
 func normalizeError(err error) *llm.Error {
 	var apiErr *sdk.Error
 	if errors.As(err, &apiErr) {
+		var body struct {
+			Error struct{ Type, Message string } `json:"error"`
+		}
+		_ = json.Unmarshal([]byte(apiErr.RawJSON()), &body)
+		// An empty account comes back as 402 billing_error, or as a 400
+		// saying the credit balance is too low. Check this before the
+		// generic 400 below.
+		if apiErr.StatusCode == http.StatusPaymentRequired || body.Error.Type == "billing_error" ||
+			(apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(body.Error.Message), "credit balance")) {
+			return llm.NewError(llm.KindNoCredit, "The Anthropic account is out of credit", err)
+		}
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return llm.NewError(llm.KindAuth, "Anthropic rejected the configured API key", err)
@@ -226,10 +240,7 @@ func normalizeError(err error) *llm.Error {
 			return llm.NewError(llm.KindInvalidReq, "Anthropic rejected the request (check model name)", err)
 		case http.StatusBadRequest:
 			msg := "Anthropic rejected the request"
-			var body struct {
-				Error struct{ Message string } `json:"error"`
-			}
-			if json.Unmarshal([]byte(apiErr.RawJSON()), &body) == nil && body.Error.Message != "" {
+			if body.Error.Message != "" {
 				msg += ": " + body.Error.Message
 			}
 			return llm.NewError(llm.KindInvalidReq, msg, err)

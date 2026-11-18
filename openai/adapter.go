@@ -106,6 +106,9 @@ func toUsage(u responses.ResponseUsage) *llm.Usage {
 	}
 }
 
+// minMaxTokens is the smallest max_output_tokens the Responses API accepts.
+const minMaxTokens = 16
+
 // toOpenAIParams maps one ChatRequest onto the Responses request.
 func toOpenAIParams(req llm.ChatRequest) responses.ResponseNewParams {
 	params := responses.ResponseNewParams{
@@ -119,6 +122,10 @@ func toOpenAIParams(req llm.ChatRequest) responses.ResponseNewParams {
 	}
 	if req.System != "" {
 		params.Instructions = sdk.String(req.System)
+	}
+	if req.MaxTokens > 0 {
+		// The Responses API rejects max_output_tokens below 16.
+		params.MaxOutputTokens = sdk.Int(int64(max(req.MaxTokens, minMaxTokens)))
 	}
 	if req.ToolChoice != "" {
 		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{
@@ -191,6 +198,11 @@ func toOpenAITools(specs []llm.ToolSpec) []responses.ToolUnionParam {
 func normalizeError(err error) *llm.Error {
 	var apiErr *sdk.Error
 	if errors.As(err, &apiErr) {
+		// An account over its quota or out of credit is a 429 like
+		// throttling, told apart by its code.
+		if apiErr.Code == "insufficient_quota" {
+			return llm.NewError(llm.KindNoCredit, "The OpenAI account is out of credit", err)
+		}
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return llm.NewError(llm.KindAuth, "OpenAI rejected the configured API key", err)
@@ -215,6 +227,9 @@ func streamError(code, message string) *llm.Error {
 		message = "OpenAI failed to finish the response"
 	}
 	cause := errors.New(code + ": " + message)
+	if code == "insufficient_quota" {
+		return llm.NewError(llm.KindNoCredit, "The OpenAI account is out of credit", cause)
+	}
 	if code == "rate_limit_exceeded" {
 		return llm.NewError(llm.KindRateLimit, "OpenAI is rate-limiting this request", cause)
 	}
