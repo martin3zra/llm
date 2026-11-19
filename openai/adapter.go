@@ -10,9 +10,10 @@ import (
 	"errors"
 	"net/http"
 
-	sdk "github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	sdk "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
 
 	"github.com/martin3zra/llm"
 )
@@ -62,7 +63,7 @@ func (a *Adapter) StreamChat(ctx context.Context, req llm.ChatRequest) (<-chan l
 					calls = append(calls, llm.ToolUse{
 						ID:    item.CallID,
 						Name:  item.Name,
-						Input: json.RawMessage(item.Arguments),
+						Input: json.RawMessage(item.Arguments.OfString),
 					})
 				}
 			case "response.completed", "response.incomplete":
@@ -153,7 +154,9 @@ func toOpenAIInput(msgs []llm.Message) responses.ResponseInputParam {
 		case m.ToolResult != nil:
 			// Results are their own item type, matched to the call by
 			// call_id, unlike Anthropic which feeds them back as a user turn.
-			out = append(out, responses.ResponseInputItemParamOfFunctionCallOutput(m.ToolResult.ToolUseID, m.ToolResult.Content))
+			item := responses.ResponseInputItemParamOfFunctionCallOutput(m.ToolResult.Content)
+			item.OfFunctionCallOutput.CallID = param.NewOpt(m.ToolResult.ToolUseID)
+			out = append(out, item)
 		case m.ToolUse != nil:
 			out = append(out, responses.ResponseInputItemParamOfFunctionCall(string(m.ToolUse.Input), m.ToolUse.ID, m.ToolUse.Name))
 		case m.Role == llm.RoleAssistant:

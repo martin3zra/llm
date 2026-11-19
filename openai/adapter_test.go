@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	sdk "github.com/openai/openai-go"
+	sdk "github.com/openai/openai-go/v3"
 
 	"github.com/martin3zra/llm"
 )

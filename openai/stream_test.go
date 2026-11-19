@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3/option"
 
 	"github.com/martin3zra/llm"
 )
@@ -25,6 +25,10 @@ func streamFrom(t *testing.T, events ...string) []llm.Event {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, e := range events {
+			if e == keepAlive {
+				fmt.Fprint(w, ": keep-alive\n\n")
+				continue
+			}
 			var head struct{ Type string }
 			_ = json.Unmarshal([]byte(e), &head)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", head.Type, e)
@@ -45,6 +49,33 @@ func streamFrom(t *testing.T, events ...string) []llm.Event {
 		got = append(got, ev)
 	}
 	return got
+}
+
+// keepAlive stands for the SSE comment OpenAI sends while the model thinks.
+const keepAlive = "keep-alive"
+
+// A keep-alive comment is not an event. openai-go v1 handed it on as one
+// with no data and failed with "unexpected end of JSON input", which
+// dropped the whole response.
+func TestStreamChat_KeepAliveIsSkipped(t *testing.T) {
+	got := streamFrom(t,
+		keepAlive,
+		`{"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"record_notes","arguments":"{}","status":"completed"}}`,
+		keepAlive,
+		`{"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
+	)
+	var call bool
+	for _, ev := range got {
+		switch ev.Kind {
+		case llm.EventError:
+			t.Fatalf("unexpected error: %v", ev.Err)
+		case llm.EventToolCall:
+			call = true
+		}
+	}
+	if !call {
+		t.Error("no tool call")
+	}
 }
 
 func TestStreamChat_TextToolCallAndUsage(t *testing.T) {
